@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: vera-decision-engine
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn bot:app --workers 4 --threads 2 --worker-class gthread --bind 0.0.0.0:$PORT --timeout 30
+    envVars:
+      - key: TEAM_NAME
+        value: "Vera Engine"
+      - key: CONTACT_EMAIL
+        value: "participant@example.com"
+    healthCheckPath: /v1/healthz
+    autoDeploy: true
