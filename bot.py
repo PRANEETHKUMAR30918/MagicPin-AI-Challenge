@@ -43,7 +43,7 @@ BOT_VERSION = "3.0.0"
 SUBMITTED_AT = datetime.now(timezone.utc).isoformat()
 
 # Guardrail constants
-COOLDOWN_SECONDS = int(os.environ.get("COOLDOWN", 10))
+COOLDOWN_SECONDS = int(os.environ.get("COOLDOWN", 4))
 
 def get_threshold(category: Optional[dict], signals: dict) -> int:
     """Dynamic threshold based on signal context."""
