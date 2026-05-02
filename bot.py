@@ -702,6 +702,14 @@ def push_context():
         }), 409
 
     _ctx_set(scope, context_id, version, payload)
+
+    # ✅ Reset strategy + cooldown for fresh merchant context
+    if scope == "merchant":
+        with _last_strategy_lock:
+            _last_strategy[context_id] = ""
+        with _cooldown_lock:
+            _cooldown.pop(context_id, None)
+
     stored_at = datetime.utcnow().isoformat() + "Z"
     ack_id = f"ack_{context_id}_v{version}"
 
