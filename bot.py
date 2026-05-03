@@ -500,14 +500,8 @@ def compose_decision(merchant: dict, trigger: dict,
         else:
             allowed = STRATEGY_MATRIX.get(last_strategy, [])
             if last_strategy in STRATEGY_MATRIX and strategy not in allowed:
-                decision_trace["strategy_note"] = (
-                    f"Blocked: {last_strategy} → {strategy} not allowed"
-                )
-                return {
-                    "send": False,
-                    "reason": "Avoiding repetitive messaging to prevent fatigue.",
-                    "_trace": decision_trace,
-                }
+                decision_trace["strategy_note"] = "fallback instead of blocking"
+                strategy = "AWARENESS_PUSH"
 
     # 9. DO_NOTHING fallback
     if strategy == "DO_NOTHING":
@@ -543,7 +537,6 @@ def compose_decision(merchant: dict, trigger: dict,
         },
         "_trace": decision_trace,
     }
-
 # ─── Simplified reply composer (rule-based, no LLM) ──────────────────────────
 
 def _compose_reply(
@@ -778,7 +771,7 @@ def reply():
     # ✅ Compose reply (rule-based)
     try:
         if from_role == "customer":
-          result = {
+           result = {
            "action": "send",
            "body": "Thanks for reaching out! We’ve received your request and will confirm your booking shortly.",
            "cta": "none",
