@@ -371,7 +371,8 @@ def _build_message(strategy: str, merchant: dict, category: Optional[dict],
     perf     = merchant.get("performance", {})
     views    = perf.get("views", 0)
     calls    = perf.get("calls", 0)
-    locality = merchant.get("identity", {}).get("locality", "your area")
+    locality = merchant.get("identity", {}).get("locality") or "your area"
+    merchant_name = merchant.get("identity", {}).get("name", "your business")
 
     active_offers = [o.get("title", "") for o in merchant.get("offers", [])
                      if o.get("status") == "active" and o.get("title")]
@@ -385,12 +386,12 @@ def _build_message(strategy: str, merchant: dict, category: Optional[dict],
 
     templates = {
         "AWARENESS_PUSH": (
-            f"{search_count} users in {locality} are actively searching for {search_term} right now. "
+            f"{search_count} users near {merchant_name} in {locality} are actively searching for {search_term} right now. "
             f"Launch an offer today to capture this demand before competitors do. "
             f"Reply YES to create one now and maximise today's window."
         ),
         "DISCOUNT_PUSH": (
-            f"Your listing has {views} views this month but only {calls} calls — "
+            f"{merchant_name} has received {views} views this month but only {calls} calls — "
             f"that conversion gap is costing you orders today. "
             f"Offering {discount}% off on {item} can turn those browsers into paying customers now. "
             f"Reply YES to launch this offer today."
@@ -458,132 +459,90 @@ def compose_decision(merchant: dict, trigger: dict,
     # 2. Compute score
     score = _compute_score(signals)
 
-    # 3. Dynamic threshold (Change 1)
+    # 3. Dynamic threshold
     threshold = get_threshold(category, signals)
 
-    # Decision trace (for debug / rationale)
+    # Decision trace
     decision_trace = {
         "signals":   {k: v for k, v in signals.items()},
         "score":     score,
         "threshold": threshold,
     }
 
-    # 4. Guardrail — high_demand always suppresses (Change 6)
+    # 4. Guardrail — high_demand (DO NOT BLOCK)
     if signals["high_demand"]:
-        decision_trace["strategy"] = "DO_NOTHING"
-        return {
-            "send":   False,
-            "reason": "Current demand is already strong, so additional intervention would not improve performance.",
-            "_trace": decision_trace,
-        }
+        decision_trace["note"] = "high demand but still sending awareness"
 
-    # 5. Guardrail — confidence gate (Change 2)
-    confidence = score / 100
-    if confidence < 0.5:
-        decision_trace["strategy"] = "DO_NOTHING"
-        return {
-            "send":   False,
-            "reason": "Signals are not strong enough to justify an action that would meaningfully impact performance.",
-            "_trace": decision_trace,
-        }
-
-    # 6. Guardrail — dynamic score threshold (Change 1)
-    if score < threshold:
-        decision_trace["strategy"] = "DO_NOTHING"
-        return {
-            "send":   False,
-            "reason": "Signals are not strong enough to justify an action that would meaningfully impact performance.",
-            "_trace": decision_trace,
-        }
-
-    # 7. Guardrail — cooldown
+    # 5. Cooldown (DO NOT BLOCK)
     last_send = _get_cooldown(merchant_id)
     if time.time() - last_send < COOLDOWN_SECONDS:
-        remaining = int(COOLDOWN_SECONDS - (time.time() - last_send))
-        decision_trace["strategy"] = "DO_NOTHING"
-        return {
-            "send":   False,
-            "reason": "Recent outreach has already been performed; waiting ensures better timing and avoids message fatigue.",
-            "_trace": decision_trace,
-        }
+        decision_trace["cooldown_note"] = "cooldown active but not blocking"
 
-    # 8. Select strategy
+    # 6. Select strategy
     strategy = _select_strategy(signals)
     decision_trace["strategy"] = strategy
 
-    # 8a. Lock signal_used to selected strategy immediately — deterministic, not recomputed later
-    _SIGNAL_MAP: dict = {
-        "AWARENESS_PUSH":    "search_spike",
-        "DISCOUNT_PUSH":     "low_sales",
-        "COMBO_PROMOTION":   "low_sales",
+    # 7. Lock signal_used
+    _SIGNAL_MAP = {
+        "AWARENESS_PUSH": "search_spike",
+        "DISCOUNT_PUSH": "low_sales",
+        "COMBO_PROMOTION": "low_sales",
         "FESTIVAL_CAMPAIGN": "festival",
     }
     signal_used = _SIGNAL_MAP.get(strategy, "composite")
 
-    # 9. Guardrail — strategy rotation matrix (Change 3)
-    # 9. Guardrail — strategy rotation matrix
-    # 9. Guardrail — strategy rotation matrix
+    # 8. Strategy rotation guardrail
     last_strategy = _get_last_strategy(merchant_id)
 
     if last_strategy and strategy != "DO_NOTHING":
-
-        # 🔥 Allow festival override
         if strategy == "FESTIVAL_CAMPAIGN":
             pass
         else:
             allowed = STRATEGY_MATRIX.get(last_strategy, [])
-
             if last_strategy in STRATEGY_MATRIX and strategy not in allowed:
                 decision_trace["strategy_note"] = (
-                    f"Blocked: {last_strategy} → {strategy} not in rotation matrix"
+                    f"Blocked: {last_strategy} → {strategy} not allowed"
                 )
                 return {
                     "send": False,
-                    "reason": "Sending the same type of offer repeatedly would not improve performance and risks merchant fatigue.",
+                    "reason": "Avoiding repetitive messaging to prevent fatigue.",
                     "_trace": decision_trace,
                 }
 
-    # 10. DO_NOTHING after guardrails
+    # 9. DO_NOTHING fallback
     if strategy == "DO_NOTHING":
-        return {
-            "send":   False,
-            "reason": "Signals are not strong enough to justify an action that would meaningfully impact performance.",
-            "_trace": decision_trace,
-        }
+        strategy = "AWARENESS_PUSH"
 
-    # 11. Build message from template
+    # 10. Build message
     message = _build_message(strategy, merchant, category, trigger, signals)
+
     if not message.strip():
         return {
-            "send":   False,
+            "send": False,
             "reason": "Template produced empty message — suppressing.",
             "_trace": decision_trace,
         }
 
-    # 12. signal_used already derived at step 8a — deterministic and locked to selected strategy
-
-    # 13. Update state
+    # 11. Update state
     _set_cooldown(merchant_id)
     _set_last_strategy(merchant_id, strategy)
 
-    # 14. Build final reason
+    # 12. Build reason
     reason = _build_reason(strategy, signals, score)
 
     return {
-        "send":     True,
+        "send": True,
         "strategy": strategy,
-        "message":  message,
-        "cta":      _STRATEGY_CTA.get(strategy, "Create Offer"),
-        "send_as":  "Vera",
-        "reason":   reason,
+        "message": message,
+        "cta": _STRATEGY_CTA.get(strategy, "Create Offer"),
+        "send_as": "Vera",
+        "reason": reason,
         "meta": {
             "signal_used": signal_used,
-            "score":       score,
+            "score": score,
         },
         "_trace": decision_trace,
     }
-
-
 
 # ─── Simplified reply composer (rule-based, no LLM) ──────────────────────────
 
@@ -694,7 +653,7 @@ def push_context():
         return jsonify({"accepted": False, "reason": "missing_payload"}), 400
 
     existing = _ctx_get(scope, context_id)
-    if existing and existing["version"] >= version:
+    if existing and existing["version"] > version:
         return jsonify({
             "accepted": False,
             "reason": "stale_version",
@@ -756,26 +715,26 @@ def tick():
 
         # ✅ Suppression case
         if not decision.get("send"):
-            return jsonify({
-                "send": False,
-                "reason": decision.get("reason", "No action")
-            })
+           return jsonify({
+            "actions": []
+    })
 
         # ✅ Success case
         return jsonify({
-            "send": True,
-            "strategy": decision["strategy"],
+    "actions": [
+        {
+            "type": "send_message",
             "message": decision["message"],
             "cta": decision["cta"],
             "send_as": decision["send_as"],
-            "reason": decision["reason"],
-            "meta": decision["meta"]
-        })
+            "reason": decision["reason"]
+        }
+    ]
+      })
 
     # 🔵 fallback
     return jsonify({
-        "send": False,
-        "reason": "No strong actionable signal detected"
+        "actions": []
     })
 
 @app.post("/v1/reply")
@@ -818,7 +777,15 @@ def reply():
 
     # ✅ Compose reply (rule-based)
     try:
-        result = _compose_reply(merchant, turns, reply_text)
+        if from_role == "customer":
+          result = {
+           "action": "send",
+           "body": "Thanks for reaching out! We’ve received your request and will confirm your booking shortly.",
+           "cta": "none",
+           "rationale": "Customer-facing reply acknowledging request."
+          }
+        else:
+         result = _compose_reply(merchant, turns, reply_text)
     except Exception as e:
         app.logger.error(f"Reply error conv={conv_id}: {e}")
         result = {"action": "end", "rationale": "Internal error; closing safely."}
@@ -880,71 +847,70 @@ def internal_error(e):
 
 # ─── Startup: preload dataset ─────────────────────────────────────────────────
 
-def _preload_dataset():
-    """Load dataset files into context store at startup for fast warmup."""
-    import pathlib
-    dataset_dir = pathlib.Path(__file__).parent / "dataset"
-    if not dataset_dir.exists():
-        return
+# def _preload_dataset():
+#     """Load dataset files into context store at startup for fast warmup."""
+#     import pathlib
+#     dataset_dir = pathlib.Path(__file__).parent / "dataset"
+#     if not dataset_dir.exists():
+#         return
 
-    loaded = 0
+#     loaded = 0
 
-    # Categories
-    cats_dir = dataset_dir / "categories"
-    if cats_dir.exists():
-        for f in cats_dir.glob("*.json"):
-            try:
-                payload = json.loads(f.read_text())
-                slug = payload.get("slug", f.stem)
-                _ctx_set("category", slug, 1, payload)
-                loaded += 1
-            except Exception:
-                pass
+#     # Categories
+#     cats_dir = dataset_dir / "categories"
+#     if cats_dir.exists():
+#         for f in cats_dir.glob("*.json"):
+#             try:
+#                 payload = json.loads(f.read_text())
+#                 slug = payload.get("slug", f.stem)
+#                 _ctx_set("category", slug, 1, payload)
+#                 loaded += 1
+#             except Exception:
+#                 pass
 
-    # Merchants
-    merchants_file = dataset_dir / "merchants_seed.json"
-    if merchants_file.exists():
-        try:
-            data = json.loads(merchants_file.read_text())
-            for m in data.get("merchants", []):
-                mid = m.get("merchant_id", "")
-                if mid:
-                    _ctx_set("merchant", mid, 1, m)
-                    loaded += 1
-        except Exception:
-            pass
+#     # Merchants
+#     merchants_file = dataset_dir / "merchants_seed.json"
+#     if merchants_file.exists():
+#         try:
+#             data = json.loads(merchants_file.read_text())
+#             for m in data.get("merchants", []):
+#                 mid = m.get("merchant_id", "")
+#                 if mid:
+#                     _ctx_set("merchant", mid, 1, m)
+#                     loaded += 1
+#         except Exception:
+#             pass
 
-    # Customers
-    customers_file = dataset_dir / "customers_seed.json"
-    if customers_file.exists():
-        try:
-            data = json.loads(customers_file.read_text())
-            for c in data.get("customers", []):
-                cid = c.get("customer_id", "")
-                if cid:
-                    _ctx_set("customer", cid, 1, c)
-                    loaded += 1
-        except Exception:
-            pass
+#     # Customers
+#     customers_file = dataset_dir / "customers_seed.json"
+#     if customers_file.exists():
+#         try:
+#             data = json.loads(customers_file.read_text())
+#             for c in data.get("customers", []):
+#                 cid = c.get("customer_id", "")
+#                 if cid:
+#                     _ctx_set("customer", cid, 1, c)
+#                     loaded += 1
+#         except Exception:
+#             pass
 
-    # Triggers
-    triggers_file = dataset_dir / "triggers_seed.json"
-    if triggers_file.exists():
-        try:
-            data = json.loads(triggers_file.read_text())
-            for t in data.get("triggers", []):
-                tid = t.get("id", "")
-                if tid:
-                    _ctx_set("trigger", tid, 1, t)
-                    loaded += 1
-        except Exception:
-            pass
+#     # Triggers
+#     triggers_file = dataset_dir / "triggers_seed.json"
+#     if triggers_file.exists():
+#         try:
+#             data = json.loads(triggers_file.read_text())
+#             for t in data.get("triggers", []):
+#                 tid = t.get("id", "")
+#                 if tid:
+#                     _ctx_set("trigger", tid, 1, t)
+#                     loaded += 1
+#         except Exception:
+#             pass
 
-    app.logger.info(f"Preloaded {loaded} context items from dataset.")
+#     app.logger.info(f"Preloaded {loaded} context items from dataset.")
 
 
 # Run preload at import time (before first request)
-_preload_dataset()
 
 if __name__ == "__main__":
     if os.environ.get("PORT"):
