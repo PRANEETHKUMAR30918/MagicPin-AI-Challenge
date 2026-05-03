@@ -696,7 +696,7 @@ def tick():
         else:
             merchant = rec["payload"]
 
-        # ✅ Compose decision
+        # ✅ Compose decisio
         decision = compose_decision(
             merchant,
             {
